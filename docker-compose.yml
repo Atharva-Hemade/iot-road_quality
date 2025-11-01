@@ -1,0 +1,15 @@
+version: '3'
+services:
+  api:
+    build: ./api
+    container_name: roadquality_api
+    ports:
+      - "5050:5000"
+    restart: always
+
+  frontend:
+    build: ./frontend
+    container_name: roadquality_frontend
+    ports:
+      - "8080:80"
+    restart: always

@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Road Quality Visualization</title>
+    <style>
+      #map {
+        height: 100vh;
+        width: 100%;
+      }
+      #status {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: white;
+        padding: 10px;
+        border-radius: 6px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+        z-index: 1000;
+        font-family: Arial, sans-serif;
+      }
+      #legend {
+        position: absolute;
+        bottom: 30px;
+        left: 10px;
+        background: white;
+        padding: 10px;
+        border-radius: 6px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+        font-family: Arial, sans-serif;
+      }
+      .legend-item {
+        display: flex;
+        align-items: center;
+        margin-bottom: 4px;
+      }
+      .legend-color {
+        width: 12px;
+        height: 12px;
+        margin-right: 6px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="status">Loading road data...</div>
+    <div id="map"></div>
+    <div id="legend">
+      <div class="legend-item">
+        <div class="legend-color" style="background:green;"></div>Road Path (Good)
+      </div>
+      <div class="legend-item">
+        <div class="legend-color" style="background:orange;"></div>Moderate Spot
+      </div>
+      <div class="legend-item">
+        <div class="legend-color" style="background:red;"></div>Severe Spot
+      </div>
+    </div>
+
+    <script>
+      const API_URL =
+        "https://ckgcoff4y9.execute-api.ap-south-1.amazonaws.com/GetRoadQualityDataFull";
+      const REFRESH_INTERVAL = 15000;
+      let map, issueMarkers = [];
+      let zoomLevel = 15;
+
+      async function fetchData() {
+        try {
+          const res = await fetch(API_URL);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+
+          const valid = data
+            .filter(
+              (d) =>
+                d.lat &&
+                d.lon &&
+                !isNaN(parseFloat(d.lat)) &&
+                !isNaN(parseFloat(d.lon))
+            )
+            .map((d, i) => ({
+              ...d,
+              lat: parseFloat(d.lat),
+              lon: parseFloat(d.lon),
+              timestamp: Number(d.timestamp) || i * 1000,
+              quality: (d.quality || "").toLowerCase(),
+            }))
+            .sort((a, b) => a.timestamp - b.timestamp);
+
+          console.log(`✅ Loaded ${valid.length} valid points`);
+          document.getElementById("status").innerText = `Fetched ${valid.length} valid points`;
+          return valid;
+        } catch (err) {
+          console.error("❌ API Fetch Error:", err);
+          document.getElementById("status").innerText = "Failed to load data";
+          return [];
+        }
+      }
+
+      function clearMap() {
+        issueMarkers.forEach((m) => m.setMap(null));
+        issueMarkers = [];
+      }
+
+      function distance(lat1, lon1, lat2, lon2) {
+        const R = 6371e3;
+        const toRad = (x) => (x * Math.PI) / 180;
+        const dLat = toRad(lat2 - lat1);
+        const dLon = toRad(lon2 - lon1);
+        const a =
+          Math.sin(dLat / 2) ** 2 +
+          Math.cos(toRad(lat1)) *
+            Math.cos(toRad(lat2)) *
+            Math.sin(dLon / 2) ** 2;
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      }
+
+      function plotData(points) {
+        clearMap();
+        if (!points.length) {
+          document.getElementById("status").innerText = "No valid data points";
+          return;
+        }
+
+        const pathSegments = [];
+        let currentSegment = [points[0]];
+
+        for (let i = 1; i < points.length; i++) {
+          const prev = points[i - 1];
+          const curr = points[i];
+          const dist = distance(prev.lat, prev.lon, curr.lat, curr.lon);
+          const timeGap = Math.abs(curr.timestamp - prev.timestamp);
+
+          // Split if large spatial or temporal gap
+          if (dist > 500 || timeGap > 15 * 60 * 1000) {
+            if (currentSegment.length > 1) pathSegments.push(currentSegment);
+            currentSegment = [curr];
+          } else {
+            currentSegment.push(curr);
+          }
+        }
+        if (currentSegment.length > 1) pathSegments.push(currentSegment);
+
+        if (pathSegments.length === 0) {
+          document.getElementById("status").innerText =
+            "No continuous road segments detected";
+          return;
+        }
+
+        // 🟢 Draw each path segment
+        pathSegments.forEach((segment) => {
+          new google.maps.Polyline({
+            path: segment.map((p) => ({ lat: p.lat, lng: p.lon })),
+            geodesic: true,
+            strokeColor: "#00aa00",
+            strokeOpacity: 0.9,
+            strokeWeight: 4,
+            map,
+          });
+        });
+
+        // 🟠🔴 Draw issue markers
+        const infoWindow = new google.maps.InfoWindow();
+        const issues = points.filter(
+          (p) => p.quality === "moderate" || p.quality === "severe"
+        );
+
+        issues.forEach((p) => {
+          const color = p.quality === "moderate" ? "orange" : "red";
+          const circle = new google.maps.Circle({
+            strokeWeight: 0.5,
+            strokeColor: "#333",
+            fillColor: color,
+            fillOpacity: 0.9,
+            map,
+            center: { lat: p.lat, lng: p.lon },
+            radius: p.quality === "severe" ? 6 : 4,
+          });
+
+          google.maps.event.addListener(circle, "click", () => {
+            infoWindow.setContent(
+              `<b>Quality:</b> ${p.quality}<br><b>RMS:</b> ${p.rms?.toFixed(3) || "N/A"}`
+            );
+            infoWindow.setPosition({ lat: p.lat, lng: p.lon });
+            infoWindow.open(map);
+          });
+
+          issueMarkers.push(circle);
+        });
+
+        // Center map on midpoint
+        const mid = Math.floor(points.length / 2);
+        map.setCenter({ lat: points[mid].lat, lng: points[mid].lon });
+        map.setZoom(12);
+
+        document.getElementById("status").innerText =
+          `Path plotted: ${points.length} points, ${issues.length} issues, ${pathSegments.length} segments`;
+      }
+
+      async function initMap() {
+        map = new google.maps.Map(document.getElementById("map"), {
+          center: { lat: 18.558, lng: 73.958 },
+          zoom: zoomLevel,
+          mapTypeId: "roadmap",
+        });
+
+        let currentData = [];
+        async function refresh() {
+          currentData = await fetchData();
+          plotData(currentData);
+        }
+
+        await refresh();
+        setInterval(refresh, REFRESH_INTERVAL);
+      }
+    </script>
+
+    <script
+      async
+      src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAGhHUFlPuxKQqWpoM2d2WrtjZU9t6eliI&callback=initMap"
+    ></script>
+  </body>
+</html>
